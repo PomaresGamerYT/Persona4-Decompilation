@@ -21,6 +21,8 @@ PRELUDE = """#ifndef PC_PRELUDE_H
 /* Tipos de 128 bits para PC (clang x86 de 32 bits no tiene __int128). */
 typedef struct { unsigned long long lo, hi; } __attribute__((aligned(16))) pc_u128;
 typedef struct { unsigned long long lo, hi; } __attribute__((aligned(16))) pc_s128;
+#include "gen/include/effect_vu0_internal.h"
+#include "gen/include/particle_spawn_internal.h"
 #endif
 """
 
@@ -115,6 +117,29 @@ def comment_decl(lines, idx):
     return True
 
 
+def unprototype(lines, idx):
+    """Convierte 'extern T f(args);' en 'extern T f();' (compatible con cualquier prototipo)."""
+    s = lines[idx]
+    if not s.lstrip().startswith("extern"):
+        return False
+    p = s.find("(")
+    if p < 0 or not re.search(r"[A-Za-z0-9_]\s*$", s[:p]):
+        return False
+    depth, q = 0, -1
+    for i in range(p, len(s)):
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                q = i
+                break
+    if q < 0 or not s[q + 1:].lstrip().startswith(";"):
+        return False
+    lines[idx] = s[:p].rstrip() + "()" + s[q + 1:]
+    return True
+
+
 def process(rel):
     orig = ROOT / rel
     text = orig.read_text(errors="replace")
@@ -127,6 +152,7 @@ def process(rel):
     orig_dir = str(orig.parent.relative_to(ROOT))
     fixes = 0
     errs = []
+    state = {}
 
     def compile_now():
         work = rel
@@ -147,7 +173,13 @@ def process(rel):
                 todo.add(int(m.group(2)) - 1)
         n = 0
         for idx in sorted(todo):
-            if idx < len(lines) and comment_decl(lines, idx):
+            if idx >= len(lines):
+                continue
+            if state.get(idx) != 1 and unprototype(lines, idx):
+                state[idx] = 1
+                n += 1
+            elif comment_decl(lines, idx):
+                state[idx] = 2
                 n += 1
         if n == 0:
             break
@@ -199,6 +231,28 @@ def main():
     s.append("Errores en total: %d" % len(full))
     s.append("--- errores por tipo (top 10)")
     s += ["%5d %s" % (n, k[:110]) for k, n in cat.most_common(10)]
+    names, types, samples = collections.Counter(), collections.Counter(), collections.defaultdict(list)
+    for e in full:
+        m = LOC.match(e)
+        if not m:
+            continue
+        msg = m.group(4)
+        mm = re.match(r"use of undeclared identifier '([^']*)'", msg)
+        if mm:
+            names[mm.group(1)] += 1
+        mm = re.match(r"unknown type name '([^']*)'", msg)
+        if mm:
+            types[mm.group(1)] += 1
+        for key in ("incompatible pointer to integer", "typedef redefinition"):
+            if msg.startswith(key) and len(samples[key]) < 3:
+                samples[key].append("%s:%s %s" % (norm(m.group(1)), m.group(2), msg[:90]))
+    s.append("--- identificadores sin declarar (top 8)")
+    s += ["%5d %s" % (n, k) for k, n in names.most_common(8)]
+    s.append("--- tipos desconocidos (top 8)")
+    s += ["%5d %s" % (n, k) for k, n in types.most_common(8)]
+    s.append("--- ejemplos")
+    for v in samples.values():
+        s += v
     s.append("--- origen de los errores (top 12)")
     s += ["%5d %s" % (n, k) for k, n in origin.most_common(12)]
     s.append("--- archivos con mas errores (top 12)")
