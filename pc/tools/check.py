@@ -62,6 +62,18 @@ def write(path, text):
     path.write_text(text)
 
 
+def has128(t):
+    return re.search(r"__u?int128", t) is not None
+
+
+def fix128(t):
+    t = re.sub(r"unsigned\s+__int128(_t)?", "pc_u128", t)
+    t = re.sub(r"signed\s+__int128(_t)?", "pc_s128", t)
+    t = re.sub(r"__uint128_t", "pc_u128", t)
+    t = re.sub(r"__int128(_t)?", "pc_s128", t)
+    return t
+
+
 def gen_headers():
     inc = ROOT / "include"
     out = GEN / "include"
@@ -77,8 +89,8 @@ def gen_headers():
         if str(rel) in ("effect_vu0_internal.h", "particle_spawn_internal.h"):
             continue
         t = h.read_text(errors="replace")
-        if "__int128" in t:
-            t = re.sub(r"unsigned\s+__int128", "pc_u128", t).replace("__int128", "pc_s128")
+        if has128(t):
+            t = fix128(t)
             write(out / rel, t)
 
 
@@ -89,6 +101,7 @@ def load_flags():
 
 FLAGS = load_flags()
 BASE = ["clang", "-fsyntax-only", "-m32", "-malign-double", "-fms-extensions", "-w",
+        "-Wno-error=int-conversion", "-Wno-error=incompatible-function-pointer-types",
         "-Ipc/gen/include", "-include", "pc/prelude.h"]
 
 
@@ -144,8 +157,8 @@ def process(rel):
     orig = ROOT / rel
     text = orig.read_text(errors="replace")
     modified = False
-    if "__int128" in text:
-        text = re.sub(r"unsigned\s+__int128", "pc_u128", text).replace("__int128", "pc_s128")
+    if has128(text):
+        text = fix128(text)
         modified = True
     lines = text.split("\n")
     gen_path = GEN / rel
@@ -188,6 +201,17 @@ def process(rel):
     else:
         errs = compile_now()
     return rel, errs, fixes, modified
+
+
+def srcline(path, ln):
+    for base in (GEN, ROOT):
+        f = base / path
+        if f.exists():
+            try:
+                return f.read_text(errors="replace").split("\n")[ln - 1].strip()[:100]
+            except Exception:
+                return ""
+    return ""
 
 
 def main():
@@ -253,6 +277,20 @@ def main():
     s.append("--- ejemplos")
     for v in samples.values():
         s += v
+    s.append("--- ejemplos con su linea de codigo")
+    shown = collections.Counter()
+    for e in full:
+        m = LOC.match(e)
+        if not m:
+            continue
+        msg = m.group(4)
+        for key in ("expected expression", "use of undeclared identifier", "conflicting types",
+                    "unknown type name", "expected ';'"):
+            if msg.startswith(key) and shown[key] < 3:
+                shown[key] += 1
+                p_, l_ = norm(m.group(1)), int(m.group(2))
+                s.append("%s:%d %s" % (p_, l_, msg[:70]))
+                s.append("      > " + srcline(p_, l_))
     s.append("--- origen de los errores (top 12)")
     s += ["%5d %s" % (n, k) for k, n in origin.most_common(12)]
     s.append("--- archivos con mas errores (top 12)")
