@@ -19,3 +19,10 @@
 M0 decomp compila: HECHO | M1 todo el codigo propio compila en PC | M2 enlaza con piezas vacias
 M3 capa de plataforma | M4 RenderWare y dibujo | M5 sonido y video | M6 efectos VU0 | M7 Wii.
 Reevaluar la viabilidad al terminar M2.
+
+## Medicion M1 (casi hecho)
+- 725 archivos comprobados (48 excluidos por asm): 699 compilan; 26 con errores (56 errores). Antes 69 %.
+- Arreglos mecanicos en copias pc/gen: tipos de 128 bits, declaraciones en conflicto, cabeceras de efectos vacias.
+- Deuda anotada: conversiones puntero/entero degradadas a aviso (solo seguro en 32 bits); efectos = funciones vacias.
+- Pendiente: builtins desconocidos, D_00887300/D_00887310/iGpffffa748 sin declarar, prototipos en conflicto.
+- Siguiente (M2): compilar a objetos (-c), enlazar y generar stubs de los simbolos que falten.

@@ -115,9 +115,18 @@ def norm(path):
     return path[len("pc/gen/"):] if path.startswith("pc/gen/") else path
 
 
+def looks_like_proto(lines, idx):
+    t = lines[idx].strip()
+    if t.startswith("extern"):
+        return True
+    if t.startswith(("//", "/*", "#", "typedef", "return", "if", "for", "while", "else")):
+        return False
+    return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_ \t\*]*\([^{}]*\)\s*;\s*(/\*.*\*/)?\s*$", t))
+
+
 def comment_decl(lines, idx):
     """Comenta con // una declaracion extern que empieza en lines[idx]."""
-    if not lines[idx].lstrip().startswith("extern"):
+    if not looks_like_proto(lines, idx):
         return False
     end = idx
     while end < len(lines) - 1 and ";" not in lines[end] and end - idx < 4:
@@ -188,7 +197,7 @@ def process(rel):
         for idx in sorted(todo):
             if idx >= len(lines):
                 continue
-            if state.get(idx) != 1 and unprototype(lines, idx):
+            if lines[idx].lstrip().startswith("extern") and state.get(idx) != 1 and unprototype(lines, idx):
                 state[idx] = 1
                 n += 1
             elif comment_decl(lines, idx):
@@ -286,11 +295,28 @@ def main():
         msg = m.group(4)
         for key in ("expected expression", "use of undeclared identifier", "conflicting types",
                     "unknown type name", "expected ';'"):
-            if msg.startswith(key) and shown[key] < 3:
+            if msg.startswith(key) and shown[key] < 0:
                 shown[key] += 1
                 p_, l_ = norm(m.group(1)), int(m.group(2))
                 s.append("%s:%d %s" % (p_, l_, msg[:70]))
                 s.append("      > " + srcline(p_, l_))
+    s.append("--- errores restantes (con su linea de codigo)")
+    seen, cnt = set(), 0
+    for e in full:
+        m = LOC.match(e)
+        if not m:
+            s.append(e[:140])
+            continue
+        p_, l_ = norm(m.group(1)), int(m.group(2))
+        key = (p_, l_, m.group(4)[:40])
+        if key in seen:
+            continue
+        seen.add(key)
+        cnt += 1
+        if cnt > 60:
+            break
+        s.append("%s:%d %s" % (p_, l_, m.group(4)[:70]))
+        s.append("    > " + srcline(p_, l_))
     s.append("--- origen de los errores (top 12)")
     s += ["%5d %s" % (n, k) for k, n in origin.most_common(12)]
     s.append("--- archivos con mas errores (top 12)")
