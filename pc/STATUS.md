@@ -39,3 +39,16 @@ Reevaluar la viabilidad al terminar M2.
 ## Siguiente (M2)
 - python3 pc/tools/check.py --objects genera objetos y ~/p4work/undefined.txt con los simbolos sin definir.
 - Generar stubs para los simbolos que falten y enlazar.
+
+## Estado tras M1 (medido con check.py --objects)
+- 773 archivos propios: 724 comprobados + 49 excluidos (asm del VU0, asm de nivel superior y nmCmdList_inferred_002ba080.c).
+- 717 compilan en sintaxis; 7 con errores (23): fclCombineMisc, fclMisc, h_malloc_inferred_001400f0, datCalc_inferred_0021a7b0, frFont, nmCmdList_inferred_00353b50, shdPersona.
+- "Compila" = solo sintaxis, efectos vacios, con deudas. No significa que funcione.
+- Errores del propio check.py hallados en la revision: la inyeccion de declaraciones desplazaba lineas y se comentaba a si misma; el tipo deducido de D_00887310 chocaba con la declaracion propia del archivo. Parche aplicado, resultado por confirmar.
+- Riesgo de ABI pendiente: parametros s64 y structs por valor (ej. radarDrawSegment(s64 ...)) ocupan distinto en x86-32 que en MIPS; auditar antes de ejecutar.
+
+## M2 (medido): 717 objetos, 4830 simbolos sin definir
+- 3876 datos (D_ y gp), 491 func_XXXXXXXX, 429 otros (incluye libc y _GLOBAL_OFFSET_TABLE_), 28 RenderWare con nombre, 6 sce.
+- Mas referenciados: jtbl_008873EC (154), memset, D_008873F4 (111), func_00440b68 (93), iGpffffb3ac (74), D_00887300 (73), RpSkyRenderStateSet (66), jtbl_008873E8 (54).
+- Segun architecture.md: jtbl_008873E8/EC y D_008873F4 = alloc/free/calloc de RenderWare; func_00440b68 = printf de depuracion; D_00887300 = setter de estados de render.
+- Decision pendiente: como dar existencia en PC a ~3900 datos que en PS2 viven en direcciones fijas del ejecutable.

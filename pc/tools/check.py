@@ -19,6 +19,9 @@ THIRD = re.compile(r"^src/(renderware|rw|cri|sce|middleware)/")
 LOC = re.compile(r"^(.*?):(\d+):(\d+): (?:fatal )?error: (.*)$")
 NOTE = re.compile(r"^(.*?):(\d+):(\d+): note: previous (?:declaration|definition) is here")
 CONFLICT = re.compile(r"(conflicting types for|redeclaration of)")
+NAMEPAT = re.compile(r"\b(D_[0-9A-Fa-f]{6,8}|[a-z]?Gpffff[0-9a-fA-F]{4}|jtbl_[0-9A-Fa-f]{6,8})\b")
+LIBC = re.compile(r"^(mem|str)[a-z]+$|^(sin|cos|tan|atan2?|sqrt|fabs|floor|ceil|pow|exp|log)f?$|^[sv]?n?printf$")
+INDEX = {}
 
 PRELUDE = """#ifndef PC_PRELUDE_H
 #define PC_PRELUDE_H
@@ -122,7 +125,7 @@ def load_flags():
 FLAGS = load_flags()
 BASE = ["-m32", "-malign-double", "-fms-extensions", "-w",
         "-Wno-error=int-conversion", "-Wno-error=incompatible-function-pointer-types",
-        "-Wno-error=return-type",
+        "-Wno-error=return-type", "-fno-pic", "-fno-pie",
         "-Ipc/gen/include", "-include", "pc/prelude.h"]
 
 
@@ -184,6 +187,32 @@ def unprototype(lines, idx):
     return True
 
 
+def build_index():
+    idx = collections.defaultdict(collections.Counter)
+    paths = list((ROOT / "src").rglob("*.c")) + list((ROOT / "include").rglob("*.h"))
+    for f in paths:
+        for ln in f.read_text(errors="replace").split("\n"):
+            t = ln.strip()
+            if not t.startswith("extern") or not t.endswith(";") or "=" in t:
+                continue
+            names = set(m.group(1) for m in NAMEPAT.finditer(t))
+            if len(names) == 1:
+                idx[next(iter(names))][t] += 1
+    return idx
+
+
+def pick_decl(name, lines):
+    pat = re.compile(r"\b%s\b" % re.escape(name))
+    for x in lines:
+        t = x.strip()
+        if t.startswith("extern") and t.endswith(";") and "=" not in t and pat.search(t):
+            return t
+    c = INDEX.get(name)
+    if c:
+        return c.most_common(1)[0][0]
+    return KNOWN.get(name)
+
+
 def process(rel):
     orig = ROOT / rel
     text = orig.read_text(errors="replace")
@@ -211,7 +240,7 @@ def process(rel):
         return run_clang(work, orig_dir, obj)
 
     def fix_decl(idx):
-        if idx is None or idx < 0 or idx >= len(lines):
+        if idx is None or idx < 0 or idx >= len(lines) or (idx == 0 and injected):
             return False
         if lines[idx].lstrip().startswith("extern") and state.get(idx) != 1 and unprototype(lines, idx):
             state[idx] = 1
@@ -234,7 +263,7 @@ def process(rel):
                     later = ln - 1
                     todo.append([later, None])
                 mm = re.match(r"use of undeclared identifier '([^']*)'", msg)
-                if f == rel and mm and mm.group(1) in KNOWN and mm.group(1) not in injected:
+                if f == rel and mm and (mm.group(1) in KNOWN or NAMEPAT.fullmatch(mm.group(1))) and mm.group(1) not in injected:
                     inject.add(mm.group(1))
                 if f == rel and re.match(r"(assigning to|operand of type) '(s128|u128)'", msg):
                     scalar = True
@@ -244,7 +273,9 @@ def process(rel):
                 todo[-1][1] = int(mn.group(2)) - 1
         n = 0
         if inject:
-            lines[0] = "\n".join(KNOWN[k] for k in sorted(inject)) + "\n" + lines[0]
+            decls = [d for d in (pick_decl(k, lines) for k in sorted(inject)) if d]
+            if decls:
+                lines[0] = " ".join(decls) + " " + lines[0]
             injected |= inject
             state.clear()
             n = 1
@@ -306,6 +337,10 @@ def link_report(out):
             g = "datos (D_ y gp)"
         elif k.startswith("sce"):
             g = "SDK de Sony (sce)"
+        elif k == "_GLOBAL_OFFSET_TABLE_":
+            g = "artefacto PIC (se quita con -fno-pic)"
+        elif LIBC.match(k):
+            g = "libc del sistema (se resuelve al enlazar)"
         else:
             g = "otros"
         groups[g] += 1
@@ -326,6 +361,7 @@ def main():
         shutil.rmtree(OUT / "obj", ignore_errors=True)
         (OUT / "obj").mkdir(parents=True, exist_ok=True)
     gen_headers()
+    INDEX.update(build_index())
     allc = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "src").rglob("*.c")
                   if not THIRD.match(str(p.relative_to(ROOT))))
     exc_file = ROOT / "pc" / "excluded.txt"
