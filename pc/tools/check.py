@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Mide cuanto del codigo propio compila en PC (clang, x86 de 32 bits) y aplica
-arreglos mecanicos en COPIAS bajo pc/gen/. No modifica src/ ni include/."""
+arreglos mecanicos en COPIAS bajo pc/gen/. No modifica src/ ni include/.
+Uso: python3 pc/tools/check.py [--objects]"""
 import collections
 import concurrent.futures as cf
 import os
@@ -13,14 +14,20 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GEN = ROOT / "pc" / "gen"
 OUT = pathlib.Path(os.environ.get("OUT", str(pathlib.Path.home() / "p4work")))
+OBJECTS = "--objects" in sys.argv
 THIRD = re.compile(r"^src/(renderware|rw|cri|sce|middleware)/")
 LOC = re.compile(r"^(.*?):(\d+):(\d+): (?:fatal )?error: (.*)$")
+NOTE = re.compile(r"^(.*?):(\d+):(\d+): note: previous (?:declaration|definition) is here")
+CONFLICT = re.compile(r"(conflicting types for|redeclaration of)")
 
 PRELUDE = """#ifndef PC_PRELUDE_H
 #define PC_PRELUDE_H
 /* Tipos de 128 bits para PC (clang x86 de 32 bits no tiene __int128). */
 typedef struct { unsigned long long lo, hi; } __attribute__((aligned(16))) pc_u128;
 typedef struct { unsigned long long lo, hi; } __attribute__((aligned(16))) pc_s128;
+/* va_start al estilo GCC 2.x (ee-gcc). En x86 los argumentos variables van en la pila. DEUDA: verificar. */
+#define __builtin_next_arg(last) ((char *)&(last) + ((sizeof(last) + 3) & ~3))
+#define __builtin_args_info(n) 0
 #include "gen/include/effect_vu0_internal.h"
 #include "gen/include/particle_spawn_internal.h"
 #endif
@@ -56,6 +63,20 @@ static inline void spawnVuAdd10(void) {}
 #endif
 """
 
+# Simbolos que el original declara fuera de C (tablas de RenderWare y una variable del gp).
+# Tipos DEDUCIDOS del uso; se inyectan solo en archivos donde el identificador no esta declarado.
+KNOWN = {
+    "D_00887300": "extern int (*D_00887300[1])(int, void *);",
+    "D_00887310": "extern int (*D_00887310[1])(int, void *, int);",
+    "iGpffffa748": "extern int iGpffffa748;",
+}
+
+# Parches puntuales (DEUDA: cambian comportamiento, hay que verificarlos).
+PATCHES = {
+    "src/cmmMisc.c": [("cmmCommunityHasRecord() == 0",
+                       "cmmCommunityHasRecord(0 /* PCFIX: argumento no recuperado */) == 0")],
+}
+
 
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,8 +111,7 @@ def gen_headers():
             continue
         t = h.read_text(errors="replace")
         if has128(t):
-            t = fix128(t)
-            write(out / rel, t)
+            write(out / rel, fix128(t))
 
 
 def load_flags():
@@ -100,15 +120,18 @@ def load_flags():
 
 
 FLAGS = load_flags()
-BASE = ["clang", "-fsyntax-only", "-m32", "-malign-double", "-fms-extensions", "-w",
+BASE = ["-m32", "-malign-double", "-fms-extensions", "-w",
         "-Wno-error=int-conversion", "-Wno-error=incompatible-function-pointer-types",
+        "-Wno-error=return-type",
         "-Ipc/gen/include", "-include", "pc/prelude.h"]
 
 
-def run_clang(path, orig_dir):
-    cmd = BASE + ["-I" + orig_dir] + FLAGS + [path]
+def run_clang(path, orig_dir, obj=None):
+    mode = ["-fsyntax-only"] if obj is None else ["-c", "-o", obj]
+    cmd = ["clang"] + mode + BASE + ["-I" + orig_dir] + FLAGS + [path]
     p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    return [l for l in (p.stdout + p.stderr).splitlines() if " error: " in l]
+    return [l for l in (p.stdout + p.stderr).splitlines()
+            if " error: " in l or ": note: previous " in l]
 
 
 def norm(path):
@@ -125,7 +148,6 @@ def looks_like_proto(lines, idx):
 
 
 def comment_decl(lines, idx):
-    """Comenta con // una declaracion extern que empieza en lines[idx]."""
     if not looks_like_proto(lines, idx):
         return False
     end = idx
@@ -167,49 +189,84 @@ def process(rel):
     text = orig.read_text(errors="replace")
     modified = False
     if has128(text):
-        text = fix128(text)
-        modified = True
+        text, modified = fix128(text), True
+    if re.search(r"\(\s*\.\.\.\s*\)", text):
+        text, modified = re.sub(r"\(\s*\.\.\.\s*\)", "()", text), True
+    for old, new in PATCHES.get(rel, []):
+        if old in text:
+            text, modified = text.replace(old, new), True
     lines = text.split("\n")
     gen_path = GEN / rel
     orig_dir = str(orig.parent.relative_to(ROOT))
-    fixes = 0
-    errs = []
-    state = {}
+    obj = str(OUT / "obj" / (rel.replace("/", "__") + ".o")) if OBJECTS else None
+    st = {"fixes": 0, "modified": modified, "scalar": False}
+    state, injected = {}, set()
 
     def compile_now():
         work = rel
-        if modified:
+        if st["modified"]:
             gen_path.parent.mkdir(parents=True, exist_ok=True)
             gen_path.write_text("\n".join(lines))
             work = "pc/gen/" + rel
-        return run_clang(work, orig_dir)
+        return run_clang(work, orig_dir, obj)
 
-    for _ in range(6):
-        errs = compile_now()
-        todo = set()
-        for e in errs:
-            m = LOC.match(e)
-            if not m:
+    def fix_decl(idx):
+        if idx is None or idx < 0 or idx >= len(lines):
+            return False
+        if lines[idx].lstrip().startswith("extern") and state.get(idx) != 1 and unprototype(lines, idx):
+            state[idx] = 1
+            return True
+        if comment_decl(lines, idx):
+            state[idx] = 2
+            return True
+        return False
+
+    raw = []
+    for _ in range(8):
+        raw = compile_now()
+        todo, inject, scalar, later = [], set(), False, None
+        for l in raw:
+            m = LOC.match(l)
+            if m:
+                f, ln, msg = norm(m.group(1)), int(m.group(2)), m.group(4)
+                later = None
+                if f == rel and CONFLICT.match(msg):
+                    later = ln - 1
+                    todo.append([later, None])
+                mm = re.match(r"use of undeclared identifier '([^']*)'", msg)
+                if f == rel and mm and mm.group(1) in KNOWN and mm.group(1) not in injected:
+                    inject.add(mm.group(1))
+                if f == rel and re.match(r"(assigning to|operand of type) '(s128|u128)'", msg):
+                    scalar = True
                 continue
-            if norm(m.group(1)) == rel and re.match(r"(conflicting types for|redeclaration of)", m.group(4)):
-                todo.add(int(m.group(2)) - 1)
+            mn = NOTE.match(l)
+            if mn and todo and later is not None and todo[-1][1] is None and norm(mn.group(1)) == rel:
+                todo[-1][1] = int(mn.group(2)) - 1
         n = 0
-        for idx in sorted(todo):
-            if idx >= len(lines):
-                continue
-            if lines[idx].lstrip().startswith("extern") and state.get(idx) != 1 and unprototype(lines, idx):
-                state[idx] = 1
-                n += 1
-            elif comment_decl(lines, idx):
-                state[idx] = 2
-                n += 1
+        if inject:
+            lines[0] = "\n".join(KNOWN[k] for k in sorted(inject)) + "\n" + lines[0]
+            injected |= inject
+            state.clear()
+            n = 1
+        elif scalar and not st["scalar"]:
+            joined = re.sub(r"\bs128\b", "s64", "\n".join(lines))
+            joined = re.sub(r"\bu128\b", "u64", joined)
+            lines[:] = joined.split("\n")
+            st["scalar"] = True
+            state.clear()
+            n = 1
+        else:
+            for later_idx, prev_idx in todo:
+                if fix_decl(later_idx) or fix_decl(prev_idx):
+                    n += 1
         if n == 0:
             break
-        fixes += n
-        modified = True
+        st["modified"] = True
+        st["fixes"] += n
     else:
-        errs = compile_now()
-    return rel, errs, fixes, modified
+        raw = compile_now()
+    errs = [l for l in raw if " error: " in l]
+    return rel, errs, st["fixes"], st["modified"]
 
 
 def srcline(path, ln):
@@ -223,9 +280,51 @@ def srcline(path, ln):
     return ""
 
 
+def link_report(out):
+    nm = shutil.which("nm") or shutil.which("llvm-nm")
+    if not nm:
+        out.append("--- M2: falta 'nm'. Instala con: sudo apt install -y binutils")
+        return
+    objs = sorted((OUT / "obj").glob("*.o"))
+    defined, undef = set(), collections.Counter()
+    for o in objs:
+        r = subprocess.run([nm, "-g", str(o)], capture_output=True, text=True)
+        for ln in r.stdout.splitlines():
+            parts = ln.split()
+            if len(parts) == 3:
+                defined.add(parts[2])
+            elif len(parts) == 2 and parts[0] in ("U", "w", "v"):
+                undef[parts[1]] += 1
+    missing = {k: v for k, v in undef.items() if k not in defined}
+    groups = collections.Counter()
+    for k in missing:
+        if k.startswith("func_"):
+            g = "func_XXXXXXXX (sin nombre)"
+        elif re.match(r"^(Rw|Rp|Rt|Rs)[A-Z]", k):
+            g = "RenderWare con nombre"
+        elif k.startswith("D_") or re.match(r"^[a-z]Gpffff", k):
+            g = "datos (D_ y gp)"
+        elif k.startswith("sce"):
+            g = "SDK de Sony (sce)"
+        else:
+            g = "otros"
+        groups[g] += 1
+    out.append("--- M2: objetos compilados: %d | simbolos sin definir: %d" % (len(objs), len(missing)))
+    for g, n in groups.most_common():
+        out.append("%6d %s" % (n, g))
+    out.append("--- los 15 mas referenciados")
+    for k, n in sorted(missing.items(), key=lambda x: -undef[x[0]])[:15]:
+        out.append("%6d %s" % (undef[k], k))
+    (OUT / "undefined.txt").write_text("\n".join(
+        "%d %s" % (undef[k], k) for k in sorted(missing, key=lambda x: -undef[x])) + "\n")
+
+
 def main():
     shutil.rmtree(GEN, ignore_errors=True)
     OUT.mkdir(parents=True, exist_ok=True)
+    if OBJECTS:
+        shutil.rmtree(OUT / "obj", ignore_errors=True)
+        (OUT / "obj").mkdir(parents=True, exist_ok=True)
     gen_headers()
     allc = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "src").rglob("*.c")
                   if not THIRD.match(str(p.relative_to(ROOT))))
@@ -243,63 +342,25 @@ def main():
     ok = sum(1 for r in results if not r[1])
     fixes = sum(r[2] for r in results)
     copies = sum(1 for r in results if r[3])
-    cat, origin, perfile = collections.Counter(), collections.Counter(), collections.Counter()
-    full = []
+    full = [e for _, errs, _, _ in results for e in errs]
+    (OUT / "report_full.txt").write_text("\n".join(full) + "\n")
+    cat, perfile = collections.Counter(), collections.Counter()
     for rel, errs, _, _ in results:
         for e in errs:
-            full.append(e)
             m = LOC.match(e)
-            if not m:
+            if m:
+                cat[re.sub(r"'[^']*'", "'X'", m.group(4))] += 1
+                perfile[rel] += 1
+            else:
                 cat["(sin ubicacion) " + e[:70]] += 1
-                continue
-            cat[re.sub(r"'[^']*'", "'X'", m.group(4))] += 1
-            origin["%s:%s" % (norm(m.group(1)), m.group(2))] += 1
-            perfile[rel] += 1
-    (OUT / "report_full.txt").write_text("\n".join(full) + "\n")
 
     s = []
     s.append("Archivos comprobados: %d (excluidos: %d)" % (len(files), len(allc) - len(files)))
     s.append("Sin errores: %d   Con errores: %d" % (ok, len(files) - ok))
-    s.append("Declaraciones extern comentadas en copias: %d (copias generadas: %d)" % (fixes, copies))
+    s.append("Arreglos mecanicos aplicados: %d (copias generadas: %d)" % (fixes, copies))
     s.append("Errores en total: %d" % len(full))
-    s.append("--- errores por tipo (top 10)")
-    s += ["%5d %s" % (n, k[:110]) for k, n in cat.most_common(10)]
-    names, types, samples = collections.Counter(), collections.Counter(), collections.defaultdict(list)
-    for e in full:
-        m = LOC.match(e)
-        if not m:
-            continue
-        msg = m.group(4)
-        mm = re.match(r"use of undeclared identifier '([^']*)'", msg)
-        if mm:
-            names[mm.group(1)] += 1
-        mm = re.match(r"unknown type name '([^']*)'", msg)
-        if mm:
-            types[mm.group(1)] += 1
-        for key in ("incompatible pointer to integer", "typedef redefinition"):
-            if msg.startswith(key) and len(samples[key]) < 3:
-                samples[key].append("%s:%s %s" % (norm(m.group(1)), m.group(2), msg[:90]))
-    s.append("--- identificadores sin declarar (top 8)")
-    s += ["%5d %s" % (n, k) for k, n in names.most_common(8)]
-    s.append("--- tipos desconocidos (top 8)")
-    s += ["%5d %s" % (n, k) for k, n in types.most_common(8)]
-    s.append("--- ejemplos")
-    for v in samples.values():
-        s += v
-    s.append("--- ejemplos con su linea de codigo")
-    shown = collections.Counter()
-    for e in full:
-        m = LOC.match(e)
-        if not m:
-            continue
-        msg = m.group(4)
-        for key in ("expected expression", "use of undeclared identifier", "conflicting types",
-                    "unknown type name", "expected ';'"):
-            if msg.startswith(key) and shown[key] < 0:
-                shown[key] += 1
-                p_, l_ = norm(m.group(1)), int(m.group(2))
-                s.append("%s:%d %s" % (p_, l_, msg[:70]))
-                s.append("      > " + srcline(p_, l_))
+    s.append("--- errores por tipo (top 8)")
+    s += ["%5d %s" % (n, k[:110]) for k, n in cat.most_common(8)]
     s.append("--- errores restantes (con su linea de codigo)")
     seen, cnt = set(), 0
     for e in full:
@@ -313,14 +374,12 @@ def main():
             continue
         seen.add(key)
         cnt += 1
-        if cnt > 60:
+        if cnt > 40:
             break
-        s.append("%s:%d %s" % (p_, l_, m.group(4)[:70]))
+        s.append("%s:%d %s" % (p_, l_, m.group(4)[:80]))
         s.append("    > " + srcline(p_, l_))
-    s.append("--- origen de los errores (top 12)")
-    s += ["%5d %s" % (n, k) for k, n in origin.most_common(12)]
-    s.append("--- archivos con mas errores (top 12)")
-    s += ["%5d %s" % (n, k) for k, n in perfile.most_common(12)]
+    if OBJECTS:
+        link_report(s)
     text = "\n".join(s)
     (OUT / "summary.txt").write_text(text + "\n")
     print(text)

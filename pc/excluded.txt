@@ -1,5 +1,5 @@
-src/Battle/btlFormation_inferred.c
 src/Battle/btlFormation_inferred_001d44a0.c
+src/Battle/btlFormation_inferred.c
 src/Battle/btlUnit_inferred_0019b710.c
 src/Graphics/Effect/effBattleOnly.c
 src/Graphics/Effect/effBlurFilter.c
@@ -42,6 +42,7 @@ src/Kernel/Kwln/kwln_inferred_00100218.c
 src/Kernel/Kwln/kwln_inferred_00100e30.c
 src/Kernel/sdkUttmx.c
 src/Kosaka/Field/k_shadow.c
+src/nmCmdList_inferred_002ba080.c
 src/promoted/code1_003e.c
 src/promoted/code1_0041.c
 src/promoted/code1_0042.c

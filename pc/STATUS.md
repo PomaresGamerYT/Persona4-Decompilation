@@ -26,3 +26,16 @@ Reevaluar la viabilidad al terminar M2.
 - Deuda anotada: conversiones puntero/entero degradadas a aviso (solo seguro en 32 bits); efectos = funciones vacias.
 - Pendiente: builtins desconocidos, D_00887300/D_00887310/iGpffffa748 sin declarar, prototipos en conflicto.
 - Siguiente (M2): compilar a objetos (-c), enlazar y generar stubs de los simbolos que falten.
+
+## Deuda anotada (hay que verificar mas adelante)
+- va_start/__builtin_args_info definidos en pc/prelude.h como macros para x86 de 32 bits; sdkDbprt_* puede comportarse mal.
+- D_00887300, D_00887310 e iGpffffa748: tipos deducidos del uso (tablas de RenderWare y una variable del gp).
+- src/cmmMisc.c: cmmCommunityHasRecord(0) es una suposicion (el original no pasaba argumento).
+- s128 tratado como s64 donde se usa como numero (fclCombineMisc.c).
+- Fuera por ahora: src/nmCmdList_inferred_002ba080.c (pasa un u32 donde se espera otro tipo) y los 48 archivos con asm.
+- Prototipos extern en conflicto: unprototype (extern T f();) o comentados en copias pc/gen.
+- Conversiones puntero/entero y return sin valor: degradados a aviso (solo seguro en 32 bits).
+
+## Siguiente (M2)
+- python3 pc/tools/check.py --objects genera objetos y ~/p4work/undefined.txt con los simbolos sin definir.
+- Generar stubs para los simbolos que falten y enlazar.
